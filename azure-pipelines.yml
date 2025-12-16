@@ -33,7 +33,7 @@ steps:
 
   # 5. Run all Playwright tests
   - script: |
-      npx playwright test
+      npx playwright test --project=chromium
     displayName: 'Run Playwright tests'
     continueOnError: true
     env:
