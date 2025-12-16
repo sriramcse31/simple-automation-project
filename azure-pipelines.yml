@@ -1,4 +1,4 @@
-# Node.js
+# Node.js with AI Triage
 # Build a general Node.js project with npm.
 # Add steps that analyze code, save build artifacts, deploy, and more:
 # https://docs.microsoft.com/azure/devops/pipelines/languages/javascript
@@ -11,38 +11,209 @@ trigger:
 pool:
   vmImage: 'ubuntu-latest'
 
-steps:
-  # 1. Checkout code
-  - checkout: self
+# CHANGED: Convert to stages for better organization
+stages:
+  - stage: Test
+    displayName: 'Run Tests'
+    jobs:
+      - job: RunPlaywrightTests
+        displayName: 'Playwright Tests'
+        steps:
+          # 1. Checkout code
+          - checkout: self
 
-  # 2. Use Node.js
-  - task: NodeTool@0
-    inputs:
-      versionSpec: '18.x'
-    displayName: 'Install Node.js'
+          # 2. Use Node.js
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '18.x'
+            displayName: 'Install Node.js'
 
-  # 3. Install dependencies
-  - script: |
-      npm ci
-    displayName: 'Install dependencies'
+          # 3. Install dependencies
+          - script: |
+              npm ci
+            displayName: 'Install dependencies'
 
-  # 4. Install Playwright browsers
-  - script: |
-      npx playwright install --with-deps
-    displayName: 'Install Playwright browsers'
+          # 4. Install Playwright browsers
+          - script: |
+              npx playwright install --with-deps
+            displayName: 'Install Playwright browsers'
 
-  # 5. Run all Playwright tests
-  - script: |
-      npx playwright test --project=chromium
-    displayName: 'Run Playwright tests'
-    continueOnError: true
-    env:
-      CI: 'true'
+          # 5. Run all Playwright tests
+          - script: |
+              npx playwright test --project=chromium
+            displayName: 'Run Playwright tests'
+            continueOnError: true
+            env:
+              CI: 'true'
 
-  # 6. Publish Playwright HTML report
-  - task: PublishPipelineArtifact@1
-    inputs:
-      targetPath: playwright-report
-      artifact: playwright-report
-      publishLocation: pipeline
-    displayName: 'Publish Playwright report'
+          # NEW: Publish test results (if you have JUnit output)
+          - task: PublishTestResults@2
+            condition: always()
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: 'test-results/results.xml'
+              failTaskOnFailedTests: false
+            displayName: 'Publish test results'
+
+          # 6. Publish Playwright HTML report
+          - task: PublishPipelineArtifact@1
+            condition: always()
+            inputs:
+              targetPath: playwright-report
+              artifact: playwright-report
+              publishLocation: pipeline
+            displayName: 'Publish Playwright report'
+
+          # NEW: Publish failure logs for triage
+          - task: PublishPipelineArtifact@1
+            condition: always()
+            inputs:
+              targetPath: test-failures
+              artifact: test-failures
+              publishLocation: pipeline
+            displayName: 'Upload failure logs'
+
+  # NEW: Triage stage (only runs if tests fail)
+  - stage: Triage
+    displayName: 'AI Failure Triage'
+    dependsOn: Test
+    condition: failed()
+    jobs:
+      - job: AnalyzeFailures
+        displayName: 'Analyze with AI'
+        timeoutInMinutes: 30
+        steps:
+          # Download test failures
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifactName: 'test-failures'
+              downloadPath: '$(System.DefaultWorkingDirectory)/test-failures'
+            displayName: 'Download failure logs'
+
+          # Setup Python
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.9'
+            displayName: 'Install Python 3.9'
+
+          # Clone triage agent repo
+          - script: |
+              git clone https://github.com/sriramcse31/ai-test-triage-agent.git
+              cd ai-test-triage-agent
+              pip install -r requirements.txt
+            displayName: 'Setup AI triage agent'
+
+          # Cache Ollama models
+          - task: Cache@2
+            inputs:
+              key: 'ollama-models | "llama3.2"'
+              path: '$(HOME)/.ollama'
+              restoreKeys: |
+                ollama-models
+            displayName: 'Cache Ollama models'
+
+          # Cache HuggingFace models
+          - task: Cache@2
+            inputs:
+              key: 'huggingface-models | "bge-small-en-v1.5"'
+              path: '$(HOME)/.cache/huggingface'
+              restoreKeys: |
+                huggingface-models
+            displayName: 'Cache HuggingFace models'
+
+          # Install and setup Ollama
+          - script: |
+              echo "📦 Installing Ollama..."
+              curl -fsSL https://ollama.com/install.sh | sh
+              
+              echo "🚀 Starting Ollama server..."
+              nohup ollama serve > ollama.log 2>&1 &
+              
+              # Wait for Ollama to be ready
+              for i in {1..30}; do
+                if curl -s http://localhost:11434/api/tags > /dev/null; then
+                  echo "✅ Ollama is ready"
+                  break
+                fi
+                echo "⏳ Waiting for Ollama... ($i/30)"
+                sleep 2
+              done
+              
+              echo "📥 Pulling LLM model..."
+              ollama pull llama3.2
+              
+              echo "✅ Ollama setup complete"
+            displayName: 'Setup Ollama LLM'
+
+          # Run AI triage
+          - script: |
+              cd ai-test-triage-agent
+              
+              echo "🤖 AI Test Failure Triage Agent"
+              echo "================================"
+              echo ""
+              
+              # Check if any failure logs exist
+              if [ ! -d "../test-failures" ] || [ -z "$(ls -A ../test-failures/*.log 2>/dev/null)" ]; then
+                echo "✅ No failure logs found - all tests passed!"
+                echo "# ✅ All Tests Passed" > ../triage-report.md
+                echo "" >> ../triage-report.md
+                echo "No failures to analyze." >> ../triage-report.md
+                exit 0
+              fi
+              
+              # Initialize report
+              echo "# 🤖 AI Test Failure Triage Report" > ../triage-report.md
+              echo "" >> ../triage-report.md
+              echo "**Build:** $(Build.BuildNumber)" >> ../triage-report.md
+              echo "**Branch:** $(Build.SourceBranch)" >> ../triage-report.md
+              echo "**Date:** $(date -u)" >> ../triage-report.md
+              echo "" >> ../triage-report.md
+              echo "---" >> ../triage-report.md
+              echo "" >> ../triage-report.md
+              
+              # Analyze each failure
+              failure_count=0
+              for log in ../test-failures/*.log; do
+                if [ -f "$log" ]; then
+                  failure_count=$((failure_count + 1))
+                  echo "📊 Analyzing: $(basename $log)"
+                  
+                  python cli.py analyze "$log" --no-llm >> ../triage-report.md 2>&1 || {
+                    echo "## ⚠️ Analysis Failed for $(basename $log)" >> ../triage-report.md
+                    echo "" >> ../triage-report.md
+                  }
+                  
+                  echo "" >> ../triage-report.md
+                  echo "---" >> ../triage-report.md
+                  echo "" >> ../triage-report.md
+                fi
+              done
+              
+              echo "" >> ../triage-report.md
+              echo "*Generated by AI Test Triage Agent*" >> ../triage-report.md
+              
+              echo ""
+              echo "✅ Analyzed $failure_count failure(s)"
+            displayName: 'Run AI triage'
+            env:
+              PYTHONUNBUFFERED: '1'
+
+          # Display report
+          - script: |
+              echo ""
+              echo "╔═══════════════════════════════════════════════════════════════╗"
+              echo "║                    TRIAGE REPORT SUMMARY                      ║"
+              echo "╚═══════════════════════════════════════════════════════════════╝"
+              echo ""
+              cat triage-report.md
+            displayName: 'Display triage summary'
+
+          # Publish triage report
+          - task: PublishPipelineArtifact@1
+            condition: always()
+            inputs:
+              targetPath: 'triage-report.md'
+              artifact: 'triage-report'
+              publishLocation: pipeline
+            displayName: 'Publish triage report'
