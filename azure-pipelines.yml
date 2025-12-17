@@ -62,7 +62,7 @@ stages:
   - stage: Triage
     displayName: 'AI Failure Triage'
     dependsOn: Test
-    condition: failed()
+    condition: always()
     jobs:
       - job: AnalyzeFailures
         displayName: 'Analyze with AI'
