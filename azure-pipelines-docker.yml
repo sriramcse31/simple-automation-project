@@ -1,0 +1,123 @@
+# Azure Pipeline using Docker image with pre-installed models
+# Place in your Playwright test repository
+
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+  - stage: Test
+    displayName: 'Run Tests'
+    jobs:
+      - job: RunPlaywrightTests
+        displayName: 'Playwright Tests'
+        steps:
+          - checkout: self
+
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '18.x'
+            displayName: 'Install Node.js'
+
+          - script: npm ci
+            displayName: 'Install dependencies'
+
+          - script: npx playwright install --with-deps
+            displayName: 'Install Playwright browsers'
+
+          - script: npx playwright test --project=chromium
+            displayName: 'Run Playwright tests'
+            continueOnError: true
+            env:
+              CI: 'true'
+
+          - task: PublishTestResults@2
+            condition: always()
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: 'test-results/results.xml'
+              failTaskOnFailedTests: false
+            displayName: 'Publish test results'
+
+          - task: PublishPipelineArtifact@1
+            condition: always()
+            inputs:
+              targetPath: playwright-report
+              artifact: playwright-report
+              publishLocation: pipeline
+            displayName: 'Publish Playwright report'
+
+          - task: PublishPipelineArtifact@1
+            condition: always()
+            inputs:
+              targetPath: test-failures
+              artifact: test-failures
+              publishLocation: pipeline
+            displayName: 'Upload failure logs'
+
+  - stage: Triage
+    displayName: 'AI Failure Triage'
+    dependsOn: Test
+    condition: failed()
+    jobs:
+      - job: AnalyzeFailures
+        displayName: 'Analyze with AI'
+        
+        # USE DOCKER CONTAINER - Models already installed!
+        container:
+          image: youracrname.azurecr.io/triage-agent:v1.0
+          endpoint: yourACRServiceConnection  # Create in Azure DevOps
+        
+        steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifactName: 'test-failures'
+              downloadPath: '$(System.DefaultWorkingDirectory)/test-failures'
+            displayName: 'Download failure logs'
+
+          - script: |
+              # Start Ollama (models already downloaded)
+              ollama serve &
+              sleep 5
+              
+              echo "🤖 AI Test Failure Triage"
+              echo "Models: Pre-installed ✅"
+              echo ""
+              
+              # Check for failures
+              if [ ! -d "test-failures" ] || [ -z "$(ls -A test-failures/*.log 2>/dev/null)" ]; then
+                echo "✅ No failures to analyze"
+                exit 0
+              fi
+              
+              # Initialize report
+              echo "# 🤖 AI Triage Report" > triage-report.md
+              echo "" >> triage-report.md
+              
+              # Analyze each failure
+              cd /app
+              for log in $(System.DefaultWorkingDirectory)/test-failures/*.log; do
+                if [ -f "$log" ]; then
+                  echo "📊 Analyzing: $(basename $log)"
+                  python3 cli.py analyze "$log" --no-llm >> $(System.DefaultWorkingDirectory)/triage-report.md
+                  echo "" >> $(System.DefaultWorkingDirectory)/triage-report.md
+                fi
+              done
+              
+              echo "✅ Analysis complete"
+            displayName: 'Run AI triage (instant - models cached)'
+
+          - script: cat $(System.DefaultWorkingDirectory)/triage-report.md
+            displayName: 'Display triage report'
+
+          - task: PublishPipelineArtifact@1
+            condition: always()
+            inputs:
+              targetPath: '$(System.DefaultWorkingDirectory)/triage-report.md'
+              artifact: 'triage-report'
+              publishLocation: pipeline
+            displayName: 'Publish triage report'
