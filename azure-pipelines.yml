@@ -115,7 +115,7 @@ stages:
               for log in $(System.DefaultWorkingDirectory)/test-failures/*.log; do
                 if [ -f "$log" ]; then
                   echo "📊 Analyzing: $(basename $log)"
-                  python3 /app/cli.py analyze "$log" --no-llm >> $(System.DefaultWorkingDirectory)/triage-report.md
+                  python3 /app/ai-test-triage-agent/cli.py analyze "$log" --no-llm >> $(System.DefaultWorkingDirectory)/triage-report.md
                   echo "" >> $(System.DefaultWorkingDirectory)/triage-report.md
                 fi
               done
