@@ -82,6 +82,15 @@ stages:
               ls -la /app/
               which python3
 
+        -   script: |
+                echo "🔍 Checking container contents:"
+                ls -la /app/
+                echo "---"
+                pwd
+                echo "---"
+                find / -name "cli.py" 2>/dev/null
+              displayName: 'Debug container'
+
           - script: |
               # Start Ollama (models already downloaded)
               ollama serve &
