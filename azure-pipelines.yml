@@ -82,7 +82,7 @@ stages:
               ls -la /app/
               which python3
 
-        -   script: |
+          - script: |
               echo "🔍 Checking container contents:"
               ls -la /app/
               echo "---"
